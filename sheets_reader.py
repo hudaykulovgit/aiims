@@ -123,6 +123,20 @@ def send_email_via_gmail(service, user_id, message):
 # ✅ Main logic
 def main():
     st.title("📦 AI Inventory System Dashboard")
+    # Sidebar model selector (tooltip entries for stock categories and reliability score removed)
+    model_options = [
+        # "google/gemini-2.5-flash-preview-05-20",
+        "openai/gpt-4.1-nano",
+        # "deepseek/deepseek-chat-v3-0324:free",
+        "anthropic/claude-sonnet-4",
+        ]
+    selected_model = st.sidebar.selectbox(
+        "🤖 Choose AI Model",
+        model_options,
+        index=0,
+        help="Choose which AI model to use for summaries and responses."
+    )
+
     creds = authenticate_google()
     sheets_service = build('sheets', 'v4', credentials=creds)
     gmail_service = build('gmail', 'v1', credentials=creds)
@@ -165,6 +179,7 @@ def main():
         inventory_df = inventory_df.copy()
         inventory_df['restock_cost'] = restock_cost
         st.dataframe(inventory_df)
+        st.caption("ℹ️ **Stock Categories:** Critical = quantity < threshold | Healthy = threshold ≤ quantity ≤ 1.5 × threshold | Overstocked = quantity > 1.5 × threshold")
 
         total_restock_cost = restock_cost.sum()
         st.metric("💵 Total Restock Cost", f"${total_restock_cost:,.2f}")
@@ -238,15 +253,24 @@ def main():
                 price = row['price']
 
                 try:
-                    # Generate email body using OpenAI
+                    # Enhanced prompt including supplier name and manager contact
+                    supplier_name = row.get('supplier_name', '').strip()
+                    greeting = f"Dear {supplier_name}," if supplier_name else "Dear Supplier,"
                     prompt = (
-                        f"Write a concise and professional restock request email for supplier about product ID '{product_id}' in category '{category}', current stock {quantity}, threshold {threshold}."
+                        f"{greeting}\n\n"
+                        f"Write a concise and professional restock request email for the following product:\n"
+                        f"- Product ID: {product_id}\n"
+                        f"- Category: {category}\n"
+                        f"- Current Stock: {quantity}\n"
+                        f"- Threshold: {threshold}\n\n"
+                        f"At the end of the message, include the following contact block:\n"
+                        f"Farrukh Khudaykulov\nPC World Store\n+80 70 8566 1551"
                     )
                     response = client.chat.completions.create(
-                        model="gpt-3.5-turbo",
+                        model=selected_model,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=250,
-                        temperature=0.2,
+                        temperature=0.5,
                     )
                     email_body = response.choices[0].message.content.strip()
                 except Exception as e:
@@ -408,7 +432,7 @@ def main():
                 "- Overstocked: quantity > threshold × 1.5\n"
             )
 
-            # Compose upgraded prompt for OpenAI
+            # Compose upgraded prompt for OpenAI (refactored)
             prompt = (
                 "You are an expert inventory management AI assistant. Analyze the following data sections:\n"
                 "1. Low stock items (categories, quantities, thresholds):\n"
@@ -421,15 +445,16 @@ def main():
                 f"{demand_spike_text if demand_spike_text else '(None)'}\n\n"
                 f"{stock_category_explanation}\n"
                 f"{stock_status_summary}\n"
-                "Please provide a short summary with deep insight as follows:\n"
-                "- Use the above stock categorization to analyze inventory health. Reference the counts of items in each category.\n"
-                "- Detect trends in usage patterns (e.g., increasing, decreasing, stable) and highlight any unusual supplier behavior (such as slow replies or underdelivery).\n"
-                "- Go beyond listing bullet points: highlight which categories are trending toward depletion, which suppliers are problematic, and which items show unusual demand.\n"
-                "- At the end, provide short actionable recommendations for the inventory manager to improve stock health and supplier responsiveness. Make these recommendations specific and practical, referencing the stock categories."
+                "Provide a concise inventory summary under 200 words. Include:\n"
+                "- Overall stock status (how many items are Critical, Healthy, Overstocked)\n"
+                "- Mention items that are low in stock (quantity < threshold) only by name.\n"
+                "- Do not include any restock quantities, cost formulas, or calculations.\n"
+                "- Focus on clarity and general actionable insight.\n"
+                "Use clean formatting and concise wording."
             )
             if shortages_text or usage_text or supplier_underdeliver_text or demand_spike_text:
                 response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=selected_model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=300,
                     temperature=0.2,
@@ -438,6 +463,12 @@ def main():
                 # Remove leading "Summary:" (case-insensitive, with or without colon and whitespace)
                 import re
                 ai_summary = re.sub(r'^\s*summary\s*:\s*', '', ai_summary, flags=re.IGNORECASE)
+                # Remove markdown headers like ## or ###
+                ai_summary = re.sub(r'^\s*#{1,6}\s*', '', ai_summary, flags=re.MULTILINE)
+                # Remove unmatched trailing bold symbols
+                ai_summary = re.sub(r'\*\*$', '', ai_summary.strip())
+                # Clean trailing hashes or asterisks
+                ai_summary = ai_summary.strip().rstrip('#').rstrip('*')
                 st.info(f"📌 AI Summary: {ai_summary}")
                 st.caption("📌 **Stock Category Rules** — *Critical: quantity < threshold | Healthy: threshold ≤ quantity ≤ 1.5xthreshold | Overstocked: quantity > 1.5xthreshold*")
                 log_event(sheets_service, event_type="SUMMARY", product_id=None, notes="Generated enhanced AI inventory summary", status="OK", assistant_action="summarize_inventory")
@@ -446,6 +477,49 @@ def main():
         except Exception as e:
             st.info("📌 AI Summary: Most categories are within healthy stock levels, but a few need attention.")
             log_event(sheets_service, event_type="SUMMARY", product_id=None, notes=f"AI summary error: {e}", status="ERROR", assistant_action="summarize_inventory")
+
+        # === Ask a question about inventory (RAG style) ===
+        st.subheader("💬 Ask Inventory AI")
+        def get_rag_answer(prompt, model):
+            try:
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                    temperature=0.2,
+                    stream=True,
+                )
+                full_reply = ""
+                with st.chat_message("ai"):
+                    message_placeholder = st.empty()
+                    for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            full_reply += chunk.choices[0].delta.content
+                            message_placeholder.markdown(full_reply + "▌")
+                    message_placeholder.markdown(full_reply)
+                return full_reply
+            except Exception as e:
+                return f"Error from LLM: {e}"
+
+        user_question = st.chat_input("Ask a question about your inventory (e.g., what's low in Accessories?)")
+        if user_question:
+            # Turn inventory_df into a text block for grounding (RAG)
+            context_rows = inventory_df.fillna("").astype(str).to_dict(orient="records")
+            context_text = "\n".join(
+                f"ID: {r['product_id']} | Name: {r.get('product_name', '')} | Category: {r['category']} | Quantity: {r['quantity']} | Threshold: {r['threshold']} | Price: {r['price']}"
+                for r in context_rows
+            )
+            rag_prompt = (
+                f"You are an inventory analyst AI. Answer the question strictly based on the context below.\n"
+                f"Context:\n{context_text}\n\n"
+                f"- Only include items where the category field exactly matches any category mentioned in the user's question.\n"
+                f"- Do not guess item types based on names or product IDs.\n"
+                f"- Use quantity and price to calculate total cost (quantity × price).\n"
+                f"- For restock cost, use (threshold - quantity) × price when quantity < threshold.\n"
+                f"Question: {user_question}\n"
+                f"Answer strictly based on the context. If insufficient information, say so."
+            )
+            get_rag_answer(rag_prompt, selected_model)
 
     with tab2:
         st.subheader("📊 Daily Usage-Based Stockout Forecasting")
@@ -484,6 +558,16 @@ def main():
                 use_container_width=True
             )
             st.caption("Rows highlighted where days until stockout is less than 7 (risk of stockout soon).")
+
+            # -- Insert: Recommend item with lowest days_until_stockout --
+            if not usage_display.empty:
+                soonest_stockout = usage_display.loc[usage_display['days_until_stockout'].idxmin()]
+                st.markdown(
+                    f"📌 **Restock Priority Suggestion:**\n"
+                    f"The item at highest risk of stockout is **{soonest_stockout['name']}** (ID: {soonest_stockout['product_id']}) "
+                    f"with only **{soonest_stockout['days_until_stockout']} days** left based on current usage "
+                    f"(Qty: {soonest_stockout['quantity']}, Daily Usage: {soonest_stockout['daily_usage']})."
+                )
 
     with tab3:
         st.subheader("📬 Email Sent Log")
@@ -609,7 +693,6 @@ def main():
 
         # ----------- AI Supplier Performance Summary -----------
         st.subheader("📈 Supplier Performance Summary")
-        st.caption("Reliability is calculated as: (Replies Received ÷ Emails Sent) × 100")
         if not updated_email_df.empty and 'supplier_email' in updated_email_df.columns:
             # Add reliability score calculation
             perf = updated_email_df.groupby('supplier_email').agg(
@@ -621,6 +704,7 @@ def main():
                 axis=1
             )
             st.dataframe(perf)
+            st.caption("ℹ️ **Reliability Score** is calculated as: (Replies Received ÷ Emails Sent) × 100")
             # -------- Enhanced AI summary with reply content and reliability score --------
             try:
                 # Map supplier_email to all their thread_ids
@@ -649,25 +733,26 @@ def main():
                     reply_excerpt = "\n".join([f"- {txt[:400]}" for txt in reply_texts if txt][:3])  # up to 3 replies, truncated
                     if reply_excerpt.strip() == "":
                         reply_excerpt = "(No reply content available)"
-                    # Compose prompt for OpenAI with urgency categorization and reliability score
+                    # Compose concise prompt for OpenAI supplier performance summary (refactored)
                     prompt = (
                         f"You are an AI assistant evaluating supplier responsiveness.\n"
                         f"Supplier: {supplier}\n"
                         f"Emails sent: {emails_sent}, Replies received: {replies_received}\n"
-                        f"Reliability score (replies_received / emails_sent * 100): {reliability_score}\n"
-                        f"Here are sample reply messages from the supplier (if any):\n{reply_excerpt}\n\n"
-                        f"Please summarize the supplier's responsiveness and the tone/content of their replies. "
-                        f"Highlight whether the responses are timely, actionable, and customer-oriented. Suggest follow-up actions if replies are missing or unsatisfactory.\n"
-                        f"Also, categorize the supplier's response as either 'Urgent', 'Delayed', or 'Normal' based on the tone and content. "
-                        f"At the start of your summary, state ONLY the category in the format: Urgency: <Urgent|Delayed|Normal>."
-                        f" Include the reliability score in your summary."
+                        f"Reliability score: {reliability_score}\n"
+                        f"Here are sample replies:\n{reply_excerpt}\n\n"
+                        f"Summarize the supplier's responsiveness in 2–3 sentences. Begin with the urgency level: Urgency: <Urgent|Delayed|Normal>.\n"
+                        f"Evaluate:\n"
+                        f"- Whether replies show clear understanding of the restock request\n"
+                        f"- Whether any reply indicates confusion or irrelevance (e.g., 'what is this?')\n"
+                        f"- Tone and professionalism\n"
+                        f"Highlight these factors fairly. Avoid starting any sentence with a comma."
                     )
                     try:
                         summary_resp = client.chat.completions.create(
-                            model="gpt-3.5-turbo",
+                            model=selected_model,
                             messages=[{"role": "user", "content": prompt}],
-                            max_tokens=250,
-                            temperature=0.6,
+                            max_tokens=300,
+                            temperature=0.2,
                         )
                         summary = summary_resp.choices[0].message.content.strip()
                         # Extract urgency flag from the summary
