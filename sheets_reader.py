@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import base64
 from email.mime.text import MIMEText
 
+from report_generator import generate_monthly_report
+
 load_dotenv()
 
 # --------------------------- CONFIG ---------------------------
@@ -19,7 +21,8 @@ SCOPE = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
-    'https://www.googleapis.com/auth/calendar'
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/documents'
 ]
 SHEET_ID = '1LD9tmCWotdS4X2xh_AXmh4V59COXN1fCwMGlgPV1Sm8'  # 🔁 Replace with your real sheet ID
 
@@ -127,6 +130,9 @@ def main():
     model_options = [
         # "google/gemini-2.5-flash-preview-05-20",
         "openai/gpt-4.1-nano",
+        # "google/gemini-2.5-flash-preview-05-20",
+        # "google/gemini-2.5-pro-preview", 
+        "x-ai/grok-3-beta",
         # "deepseek/deepseek-chat-v3-0324:free",
         "anthropic/claude-sonnet-4",
         ]
@@ -270,7 +276,7 @@ def main():
                         model=selected_model,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=250,
-                        temperature=0.5,
+                        temperature=0.6,
                     )
                     email_body = response.choices[0].message.content.strip()
                 except Exception as e:
@@ -485,8 +491,8 @@ def main():
                 stream = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.2,
+                    max_tokens=600,
+                    temperature=0.5,
                     stream=True,
                 )
                 full_reply = ""
@@ -763,6 +769,8 @@ def main():
                         else:
                             urgency_flag = "Normal"
                             summary_content = summary
+                        # Remove any leading period or whitespace
+                        summary_content = summary_content.lstrip(" .")
                         # Remove any redundant "Reliability score: ..." lines from the summary_content (case-insensitive, line start or after a period)
                         summary_content = re.sub(r'(^|\n)[ \t]*Reliability score\s*:\s*.*(\n|$)', '', summary_content, flags=re.IGNORECASE)
                         summary_content = re.sub(r'(^|\n)[ \t]*Reliability\s*:\s*.*(\n|$)', '', summary_content, flags=re.IGNORECASE)
@@ -847,6 +855,17 @@ def main():
             )
         else:
             st.info("Log sheet is currently empty.")
+
+
+        # 📄 Generate Inventory Performance Report
+        st.subheader("📝 Monthly Inventory Report")
+        if st.button("📄 Generate Google Docs Report"):
+            with st.spinner("Generating report..."):
+                try:
+                    report_url = generate_monthly_report(inventory_df, email_df, log_df, creds)
+                    st.success(f"✅ Report generated: [Open Report]({report_url})")
+                except Exception as e:
+                    st.error(f"Failed to generate report: {e}")
 
 
 if __name__ == "__main__":
