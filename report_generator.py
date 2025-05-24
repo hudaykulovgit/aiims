@@ -1,6 +1,3 @@
-
-
-
 import pandas as pd
 from datetime import datetime
 from googleapiclient.discovery import build
@@ -34,6 +31,7 @@ def generate_monthly_report(inventory_df, email_df, log_df, creds):
 
 ⚠️ Issues Identified:
 - Stockouts risk detected in {len(critical)} item(s). These items are below threshold and need immediate attention.
+{''.join(f'- {row["product_name"]} (Qty: {row["quantity"]}, Threshold: {row["threshold"]})\n' for _, row in critical.iterrows()) if not critical.empty else ''}
 - Total number of email alerts sent: {len(email_df)}.
 - Logged system events this month: {len(log_df)}
 
